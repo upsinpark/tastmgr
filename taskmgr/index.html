@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>모바일 작업관리</title>
+    
+    <!-- 1. 스타일 및 폰트 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    
+    <!-- 2. 리액트 실행을 위한 도구 (Babel) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- 3. 외부 라이브러리 연결 (설치 없이 바로 사용) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
+            "firebase/auth": "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js",
+            "firebase/firestore": "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js",
+            "lucide-react": "https://esm.sh/lucide-react@0.294.0"
+        }
+    }
+    </script>
+
+    <style>
+        /* 모바일 터치감 개선 및 애니메이션 */
+        body { 
+            -webkit-tap-highlight-color: transparent; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        .animate-slide-up { animation: slideUp 0.3s ease-out; }
+        .animate-fade-in { animation: fadeIn 0.3s ease-out; }
+        
+        @keyframes slideUp { 
+            from { transform: translateY(100%); } 
+            to { transform: translateY(0); } 
+        }
+        @keyframes fadeIn { 
+            from { opacity: 0; } 
+            to { opacity: 1; } 
+        }
+
+        /* 스크롤바 숨기기 (깔끔한 UI) */
+        .scrollbar-hide::-webkit-scrollbar {
+            display: none;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+
+<div id="root"></div>
+
+<!-- 메인 로직 시작 -->
+<script type="text/babel" data-type="module">
+    import React, { useState, useEffect, useMemo, useRef } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { initializeApp } from "firebase/app";
+    import { 
+        getAuth, 
+        signInAnonymously, 
+        onAuthStateChanged,
+        setPersistence,
+        browserLocalPersistence 
+    } from "firebase/auth";
+    import { 
+        getFirestore, 
+        collection, 
+        addDoc, 
+        updateDoc, 
+        deleteDoc, 
+        doc, 
+        query, 
+        onSnapshot, 
+        serverTimestamp, 
+        writeBatch,
+        getDoc,
+        setDoc
+    } from "firebase/firestore";
+    import { 
+        Plus, CheckCircle, Settings, ClipboardList, TrendingUp, 
+        DollarSign, Trash2, X, ChevronDown, Lock, Copy
+    } from 'lucide-react';
+
+    // =================================================================
+    // [설정 영역] 입력해주신 파이어베이스 설정값입니다.
+    // =================================================================
+    const firebaseConfig = {
+       apiKey: "AIzaSyDvZzIleweh5KhxgEC1MJifXHbmxywzQog",
+       authDomain: "yupj1-32b66.firebaseapp.com",
+       projectId: "yupj1-32b66",
+       storageBucket: "yupj1-32b66.firebasestorage.app",
+       messagingSenderId: "70353187098",
+       appId: "1:70353187098:web:fabf15a6956fa297ef3ca3",
+       measurementId: "G-2YT3GJDGK3"
+    };
+
+    // 앱 고유 ID (데이터 저장 경로 구분용)
+    const appId = 'my-sales-app-v1';
+
+    // Firebase 초기화 (설정값이 없으면 더미 객체 반환하여 에러 방지)
+    const app = Object.keys(firebaseConfig).length > 0 ? initializeApp(firebaseConfig) : null;
+    const auth = app ? getAuth(app) : null;
+    const db = app ? getFirestore(app) : null;
+
+    // --- 유틸리티 함수 ---
+    const formatCurrency = (amount) => {
+        return new Intl.NumberFormat('ko-KR', { style: 'currency', currency: 'KRW' }).format(amount);
+    };
+
+    const formatDate = (date) => {
+        if (!date) return '';
+        // Firestore Timestamp 처리
+        const d = date.seconds ? new Date(date.seconds * 1000) : new Date(date);
+        return d.toLocaleDateString('ko-KR');
+    };
+
+    const STATUS_MAP = {
+        'ready': { label: '준비', color: 'bg-gray-100 text-gray-600 border-gray-200', borderL: 'border-l-4 border-gray-300' },
+        'processing': { label: '제판/가공', color: 'bg-purple-100 text-purple-700 border-purple-200', borderL: 'border-l-4 border-purple-500' },
+        'completed': { label: '완료', color: 'bg-blue-100 text-blue-700 border-blue-200', borderL: 'border-l-4 border-blue-500' },
+        'settlement_requested': { label: '요청됨', color: 'bg-amber-100 text-amber-700 border-amber-200', borderL: 'border-l-4 border-amber-500' },
+        'paid': { label: '지급 완료', color: 'bg-green-100 text-green-700 border-green-200', borderL: 'border-l-4 border-green-500' }
+    };
+
+    const STATUS_OPTIONS = ['ready', 'processing', 'completed', 'paid'];
+
+    // --- 컴포넌트: PIN 인증 ---
+    const PinAuth = ({ userId, onAuthenticated }) => {
+        const [pin, setPin] = useState(['', '', '', '']);
+        const [mode, setMode] = useState('loading'); 
+        const [firstPin, setFirstPin] = useState(null);
+        const [error, setError] = useState('');
+        const inputRefs = useRef([]);
+
+        useEffect(() => {
+            const checkPinStatus = async () => {
+                if (!userId || !db) return;
+                try {
+                    const docRef = doc(db, `artifacts/${appId}/users/${userId}/profile`, 'settings');
+                    const docSnap = await getDoc(docRef);
+                    if (docSnap.exists() && docSnap.data().pinHash) {
+                        setMode('check');
+                    } else {
+                        setMode('set');
+                    }
+                } catch (e) {
+                    console.error("PIN 확인 오류:", e);
+                    setMode('set'); // 에러 시 안전하게 설정 모드로
+                }
+            };
+            checkPinStatus();
+        }, [userId]);
+
+        const handleInput = (index, value) => {
+            if (value.length > 1) value = value.slice(-1);
+            if (!/^\d*$/.test(value)) return;
+            const newPin = [...pin];
+            newPin[index] = value;
+            setPin(newPin);
+            if (value && index < 3) inputRefs.current[index + 1].focus();
+            setError('');
+        };
+
+        const handleKeyDown = (index, e) => {
+            if (e.key === 'Backspace' && !pin[index] && index > 0) {
+                inputRefs.current[index - 1].focus();
+            }
+        };
+
+        const handleSubmit = async () => {
+            const currentPinStr = pin.join('');
+            if (currentPinStr.length !== 4) return;
+
+            if (mode === 'set') {
+                setFirstPin(currentPinStr);
+                setPin(['', '', '', '']);
+                setMode('confirm');
+                inputRefs.current[0].focus();
+            } else if (mode === 'confirm') {
+                if (currentPinStr === firstPin) {
+                    await setDoc(doc(db, `artifacts/${appId}/users/${userId}/profile`, 'settings'), {
+                        pinHash: currentPinStr,
+                        pinSetAt: serverTimestamp()
+                    }, { merge: true });
+                    onAuthenticated();
+                } else {
+                    setError('PIN이 일치하지 않습니다. 처음부터 다시 설정해주세요.');
+                    setMode('set');
+                    setPin(['', '', '', '']);
+                    setFirstPin(null);
+                    inputRefs.current[0].focus();
+                }
+            } else if (mode === 'check') {
+                const docRef = doc(db, `artifacts/${appId}/users/${userId}/profile`, 'settings');
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists() && docSnap.data().pinHash === currentPinStr) {
+                    onAuthenticated();
+                } else {
+                    setError('PIN이 올바르지 않습니다.');
+                    setPin(['', '', '', '']);
+                    inputRefs.current[0].focus();
+                }
+            }
+        };
+
+        if (mode === 'loading') return <div className="flex h-screen items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div></div>;
+
+        return (
+            <div className="fixed inset-0 bg-white z-50 flex flex-col items-center justify-center p-6 animate-fade-in">
+                <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mb-6 text-blue-600">
+                    <Lock size={32} />
+                </div>
+                <h2 className="text-2xl font-bold mb-2 text-gray-800">
+                    {mode === 'set' && '새 PIN 설정'}
+                    {mode === 'confirm' && 'PIN 재확인'}
+                    {mode === 'check' && '로그인'}
+                </h2>
+                <div className="flex gap-3 mb-8">
+                    {pin.map((digit, idx) => (
+                        <input key={idx} ref={el => inputRefs.current[idx] = el} type="password" inputMode="numeric" maxLength={1} className="w-14 h-14 text-center text-2xl border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none transition-colors" value={digit} onChange={(e) => handleInput(idx, e.target.value)} onKeyDown={(e) => handleKeyDown(idx, e)} />
+                    ))}
+                </div>
+                {error && <p className="text-red-500 mb-4 text-sm animate-pulse">{error}</p>}
+                <button onClick={handleSubmit} disabled={pin.join('').length !== 4} className="w-full max-w-xs bg-blue-600 text-white py-4 rounded-xl font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-blue-700 transition shadow-lg">확인</button>
+            </div>
+        );
+    };
+
+    // --- 컴포넌트: 자동완성 입력 ---
+    const AutocompleteInput = ({ label, value, onChange, options, placeholder, type = 'text', onSelect }) => {
+        const [showSuggestions, setShowSuggestions] = useState(false);
+        const filteredOptions = useMemo(() => {
+            if (!value) return [];
+            return options.filter(opt => opt.name.toLowerCase().includes(value.toLowerCase())).slice(0, 5);
+        }, [value, options]);
+
+        return (
+            <div className="relative mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
+                <input type={type} className="w-full p-3 bg-gray-50 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 transition-all outline-none" placeholder={placeholder} value={value} onChange={(e) => { onChange(e.target.value); setShowSuggestions(true); }} onFocus={() => setShowSuggestions(true)} onBlur={() => setTimeout(() => setShowSuggestions(false), 200)} />
+                {showSuggestions && filteredOptions.length > 0 && (
+                    <div className="absolute z-10 w-full bg-white border border-gray-200 rounded-b-xl shadow-lg mt-1 max-h-40 overflow-y-auto">
+                        {filteredOptions.map((opt, idx) => (
+                            <div key={idx} className="p-3 hover:bg-blue-50 cursor-pointer text-sm text-gray-700 border-b last:border-0" onClick={() => { onChange(opt.name); if (onSelect) onSelect(opt); setShowSuggestions(false); }}>
+                                <span className="font-semibold">{opt.name}</span>
+                                {opt.defaultUnitPrice && <span className="text-xs text-gray-500 ml-2">({formatCurrency(opt.defaultUnitPrice)})</span>}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    // --- 메인 앱 컴포넌트 ---
+    const App = () => {
+        const [user, setUser] = useState(null);
+        // 세션 스토리지에서 인증 상태 확인 (새로고침 시 PIN 재입력 방지)
+        const [isAuthenticated, setIsAuthenticated] = useState(() => sessionStorage.getItem('pin_verified') === 'true');
+        const [activeTab, setActiveTab] = useState('progress');
+        const [loading, setLoading] = useState(true);
+        const [authError, setAuthError] = useState(null); // 인증 에러 상태 추가
+        const [tasks, setTasks] = useState([]);
+        const [clients, setClients] = useState([]);
+        const [products, setProducts] = useState([]);
+        
+        // 모달 상태
+        const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
+        const [editingTask, setEditingTask] = useState(null);
+        const [isProductModalOpen, setIsProductModalOpen] = useState(false);
+        const [isSettlementModalOpen, setIsSettlementModalOpen] = useState(false);
+        
+        const [formData, setFormData] = useState({ client: '', productName: '', quantity: 1, unitPrice: 10000, expense: 0, description: '' });
+
+        // 인증 초기화
+        useEffect(() => {
+            if (!auth) return;
+            const initAuth = async () => {
+                try { 
+                    await setPersistence(auth, browserLocalPersistence);
+                    // 자동 익명 로그인 (사용자 식별용)
+                    await signInAnonymously(auth);
+                } catch (e) { 
+                    console.error("Auth Error Details:", e);
+                    // 에러 메시지 설정
+                    if (e.code === 'auth/configuration-not-found' || e.code === 'auth/operation-not-allowed' || e.code === 'auth/admin-restricted-operation') {
+                        setAuthError({
+                            title: "파이어베이스 설정 필요",
+                            message: "파이어베이스 콘솔에서 '익명 로그인'이 비활성화되어 있습니다.\n콘솔 -> Authentication -> Sign-in method 탭에서 'Anonymous'를 사용 설정해주세요."
+                        });
+                    } else {
+                        setAuthError({
+                            title: "로그인 오류",
+                            message: `로그인 중 문제가 발생했습니다.\n${e.message}`
+                        });
+                    }
+                    setLoading(false);
+                }
+            };
+            initAuth();
+            return onAuthStateChanged(auth, (u) => { setUser(u); if (!u && !authError) setLoading(false); });
+        }, []);
+
+        // 데이터 실시간 동기화
+        useEffect(() => {
+            if (!user || !db) return;
+            const tasksUnsub = onSnapshot(query(collection(db, `artifacts/${appId}/users/${user.uid}/tasks`)), (snap) => { setTasks(snap.docs.map(doc => ({ id: doc.id, ...doc.data() }))); setLoading(false); });
+            const clientsUnsub = onSnapshot(query(collection(db, `artifacts/${appId}/users/${user.uid}/clients`)), (snap) => setClients(snap.docs.map(doc => ({ id: doc.id, ...doc.data() }))));
+            const productsUnsub = onSnapshot(query(collection(db, `artifacts/${appId}/users/${user.uid}/products`)), (snap) => setProducts(snap.docs.map(doc => ({ id: doc.id, ...doc.data() }))));
+            return () => { tasksUnsub(); clientsUnsub(); productsUnsub(); };
+        }, [user]);
+
+        // 액션 함수들
+        const handleSaveTask = async () => {
+            if (!formData.client || !formData.productName || formData.quantity <= 0) { alert("필수 정보를 입력해주세요."); return; }
+            const taskData = { ...formData, quantity: Number(formData.quantity), unitPrice: Number(formData.unitPrice), expense: Number(formData.expense), revenue: Number(formData.quantity) * Number(formData.unitPrice), updatedAt: serverTimestamp() };
+            try {
+                if (editingTask) { await updateDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks`, editingTask.id), taskData); } 
+                else { await addDoc(collection(db, `artifacts/${appId}/users/${user.uid}/tasks`), { ...taskData, status: 'ready', createdAt: serverTimestamp() }); }
+                
+                // 마스터 데이터 업데이트 (거래처, 품목)
+                if (!clients.some(c => c.name === formData.client)) addDoc(collection(db, `artifacts/${appId}/users/${user.uid}/clients`), { name: formData.client, createdAt: serverTimestamp() });
+                const existingProduct = products.find(p => p.name === formData.productName);
+                if (!existingProduct) { addDoc(collection(db, `artifacts/${appId}/users/${user.uid}/products`), { name: formData.productName, defaultUnitPrice: Number(formData.unitPrice), createdAt: serverTimestamp() }); } 
+                else if (existingProduct.defaultUnitPrice !== Number(formData.unitPrice)) { updateDoc(doc(db, `artifacts/${appId}/users/${user.uid}/products`, existingProduct.id), { defaultUnitPrice: Number(formData.unitPrice) }); }
+                closeTaskModal();
+            } catch (e) { console.error(e); alert("저장 중 오류가 발생했습니다."); }
+        };
+
+        const handleDeleteTask = async () => { if (!editingTask || !confirm("정말 삭제하시겠습니까?")) return; await deleteDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks`, editingTask.id)); closeTaskModal(); };
+        const handleStatusChange = async (taskId, newStatus) => { const updateData = { status: newStatus }; if (newStatus === 'completed') updateData.completionDate = serverTimestamp(); if (newStatus === 'paid') updateData.paymentDate = serverTimestamp(); await updateDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks`, taskId), updateData); };
+        const handleSettlementRequest = async () => { const tasksToSettle = tasks.filter(t => t.status === 'completed'); if (tasksToSettle.length === 0) return; if (!confirm(`${tasksToSettle.length}건을 정산 요청 처리하시겠습니까?`)) return; const batch = writeBatch(db); const settlementDate = serverTimestamp(); tasksToSettle.forEach(task => { batch.update(doc(db, `artifacts/${appId}/users/${user.uid}/tasks`, task.id), { status: 'settlement_requested', settlementDate }); }); await batch.commit(); setIsSettlementModalOpen(false); };
+        
+        const openTaskModal = (task = null) => { setEditingTask(task); setFormData(task ? { client: task.client, productName: task.productName, quantity: task.quantity, unitPrice: task.unitPrice, expense: task.expense || 0, description: task.description || '' } : { client: '', productName: '', quantity: 1, unitPrice: 10000, expense: 0, description: '' }); setIsTaskModalOpen(true); };
+        const closeTaskModal = () => { setIsTaskModalOpen(false); setEditingTask(null); };
+        const groupTasks = (taskList) => { const grouped = {}; taskList.forEach(task => { const client = task.client || '기타'; if (!grouped[client]) grouped[client] = []; grouped[client].push(task); }); return Object.entries(grouped).sort((a, b) => a[0].localeCompare(b[0])); };
+
+        // 렌더링 시작
+        // 설정 오류 표시
+        if (!app) return <div className="flex h-screen items-center justify-center p-6 text-center bg-gray-50"><div><h1 className="text-xl font-bold mb-3 text-red-600">설정 오류</h1><p>index.html 파일을 열고<br/><code className="bg-gray-200 p-1 rounded">firebaseConfig</code> 부분을 채워주세요.</p></div></div>;
+        
+        // 인증 오류 표시 (사용자에게 해결 방법 안내)
+        if (authError) {
+            return (
+                <div className="flex h-screen items-center justify-center p-6 text-center bg-gray-50">
+                    <div className="max-w-md bg-white p-8 rounded-2xl shadow-xl">
+                        <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <Lock size={32} />
+                        </div>
+                        <h1 className="text-xl font-bold mb-3 text-gray-800">{authError.title}</h1>
+                        <p className="text-gray-600 mb-6 whitespace-pre-line text-sm">{authError.message}</p>
+                        <a href="https://console.firebase.google.com/" target="_blank" className="inline-block w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition">
+                            파이어베이스 콘솔로 이동
+                        </a>
+                    </div>
+                </div>
+            );
+        }
+
+        if (!user) return <div className="flex h-screen items-center justify-center bg-gray-50"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600"></div></div>;
+        if (!isAuthenticated) return <PinAuth userId={user.uid} onAuthenticated={() => { setIsAuthenticated(true); sessionStorage.setItem('pin_verified', 'true'); }} />;
+
+        const progressTasks = tasks.filter(t => ['ready', 'processing'].includes(t.status));
+        const completedTasks = tasks.filter(t => ['completed', 'settlement_requested'].includes(t.status));
+        const paidTasks = tasks.filter(t => t.status === 'paid');
+        const settlementSum = completedTasks.filter(t => t.status === 'completed').reduce((sum, t) => sum + (t.revenue || 0), 0);
+
+        return (
+            <div className="min-h-screen bg-gray-50 font-sans pb-24 md:pb-0">
+                <header className="bg-white shadow-sm sticky top-0 z-20">
+                    <div className="max-w-3xl mx-auto px-4 py-4 flex justify-between items-center">
+                        <div><h1 className="text-xl font-bold text-gray-800">작업관리</h1><p className="text-xs text-gray-500">v2.1 Mobile | {user.uid.slice(0,5)}...</p></div>
+                        <button onClick={() => setIsProductModalOpen(true)} className="p-2 bg-gray-100 rounded-full hover:bg-gray-200 transition"><Settings size={20} className="text-gray-600" /></button>
+                    </div>
+                    <div className="flex border-b border-gray-200 max-w-3xl mx-auto">
+                        {[ { id: 'progress', label: '진행중', icon: ClipboardList }, { id: 'completed', label: '완료/정산', icon: CheckCircle }, { id: 'stats', label: '통계', icon: TrendingUp } ].map(tab => (
+                            <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex-1 py-3 text-sm font-medium flex justify-center items-center gap-2 relative transition-colors ${activeTab === tab.id ? 'text-blue-600' : 'text-gray-500 hover:text-gray-700'}`}>
+                                <tab.icon size={16} />{tab.label}{activeTab === tab.id && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-t-full"></div>}
+                            </button>
+                        ))}
+                    </div>
+                </header>
+
+                <main className="max-w-3xl mx-auto p-4 space-y-4">
+                    {/* 탭 1: 진행중 */}
+                    {activeTab === 'progress' && (
+                        <div className="animate-fade-in space-y-4">
+                            <button onClick={() => openTaskModal()} className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-transform"><Plus size={20} /> 새 작업 등록</button>
+                            {progressTasks.length === 0 ? <div className="text-center py-10 text-gray-400">진행 중인 작업이 없습니다.</div> : groupTasks(progressTasks).map(([client, clientTasks]) => (
+                                <div key={client} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                                    <div className="bg-gray-50 px-4 py-2 font-semibold text-gray-700 border-b flex justify-between items-center"><span>{client}</span><span className="text-xs bg-gray-200 px-2 py-0.5 rounded-full text-gray-600">{clientTasks.length}</span></div>
+                                    <div className="divide-y divide-gray-50">{clientTasks.map(task => <TaskItem key={task.id} task={task} onClick={() => openTaskModal(task)} onStatusChange={handleStatusChange} isCompact={true} />)}</div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    {/* 탭 2: 완료/정산 */}
+                    {activeTab === 'completed' && (
+                        <div className="animate-fade-in space-y-4">
+                            <div className="bg-amber-50 border border-amber-100 p-4 rounded-xl shadow-sm">
+                                <div className="flex justify-between items-center mb-2"><span className="text-amber-800 font-medium text-sm">정산 요청 대상</span><span className="text-2xl font-bold text-blue-600">{formatCurrency(settlementSum)}</span></div>
+                                <button onClick={() => setIsSettlementModalOpen(true)} disabled={settlementSum === 0} className="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:bg-gray-300 transition shadow-sm"><ClipboardList size={16}/> 정산 명세서 요청</button>
+                            </div>
+                            {completedTasks.length === 0 ? <div className="text-center py-10 text-gray-400">완료된 내역이 없습니다.</div> : groupTasks(completedTasks).map(([client, clientTasks]) => (
+                                <div key={client} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"><div className="bg-gray-50 px-4 py-2 font-semibold text-gray-700 border-b">{client}</div><div className="divide-y divide-gray-50">{clientTasks.map(task => <TaskItem key={task.id} task={task} onClick={() => openTaskModal(task)} onStatusChange={handleStatusChange} readonly={task.status === 'settlement_requested'} />)}</div></div>
+                            ))}
+                        </div>
+                    )}
+                    {/* 탭 3: 통계 */}
+                    {activeTab === 'stats' && <StatsView tasks={paidTasks} />}
+                </main>
+
+                {/* 모달: 작업 등록/수정 */}
+                {isTaskModalOpen && (
+                    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm p-0 sm:p-4">
+                        <div className="bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl shadow-2xl animate-slide-up max-h-[90vh] overflow-y-auto">
+                            <div className="p-4 border-b flex justify-between items-center sticky top-0 bg-white z-10"><h3 className="font-bold text-lg">{editingTask ? '작업 수정' : '새 작업 등록'}</h3><button onClick={closeTaskModal} className="p-2 hover:bg-gray-100 rounded-full"><X size={20}/></button></div>
+                            <div className="p-5 space-y-4">
+                                <AutocompleteInput label="거래처" value={formData.client} onChange={v => setFormData({...formData, client: v})} options={clients} placeholder="거래처 검색 또는 입력" />
+                                <AutocompleteInput label="제품명" value={formData.productName} onChange={v => setFormData({...formData, productName: v})} options={products} placeholder="제품 검색 또는 입력" onSelect={p => setFormData(prev => ({...prev, unitPrice: p.defaultUnitPrice || 10000}))} />
+                                <div className="flex gap-4">
+                                    <div className="flex-1"><label className="block text-sm font-medium mb-1 text-gray-700">수량</label><input type="number" className="w-full p-3 border rounded-xl bg-gray-50" value={formData.quantity} onChange={e => setFormData({...formData, quantity: e.target.value})} /></div>
+                                    <div className="flex-1"><label className="block text-sm font-medium mb-1 text-gray-700">단가</label><input type="number" className="w-full p-3 border rounded-xl bg-gray-50" value={formData.unitPrice} onChange={e => setFormData({...formData, unitPrice: e.target.value})} /></div>
+                                </div>
+                                <div><label className="block text-sm font-medium mb-1 text-gray-700">지출(비용)</label><input type="number" className="w-full p-3 border border-red-200 bg-red-50 rounded-xl" value={formData.expense} onChange={e => setFormData({...formData, expense: e.target.value})} /></div>
+                                <div><label className="block text-sm font-medium mb-1 text-gray-700">비고</label><textarea className="w-full p-3 border rounded-xl h-20 bg-gray-50 resize-none" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} /></div>
+                                <div className="flex gap-3 pt-4 border-t mt-4">{editingTask ? <button onClick={handleDeleteTask} className="bg-red-100 text-red-600 p-3 rounded-xl hover:bg-red-200"><Trash2/></button> : <div/>} <button onClick={handleSaveTask} className="flex-1 bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 shadow-lg">{editingTask ? '수정 완료' : '등록하기'}</button></div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* 모달: 제품 관리 */}
+                {isProductModalOpen && <ProductManagerModal isOpen={isProductModalOpen} onClose={() => setIsProductModalOpen(false)} products={products} user={user} />}
+                
+                {/* 모달: 정산 미리보기 */}
+                {isSettlementModalOpen && <SettlementPreviewModal tasks={tasks.filter(t => t.status === 'completed')} onClose={() => setIsSettlementModalOpen(false)} onConfirm={handleSettlementRequest} />}
+            </div>
+        );
+    };
+
+    // --- 서브 컴포넌트들 ---
+    const TaskItem = ({ task, onClick, onStatusChange, readonly, isCompact }) => {
+        const statusConfig = STATUS_MAP[task.status] || STATUS_MAP['ready'];
+        if (isCompact) {
+            return (
+                <div className="p-3 hover:bg-gray-50 flex items-center gap-3 transition cursor-pointer" onClick={onClick}>
+                    <div className={`w-1.5 h-10 rounded-full flex-shrink-0 ${statusConfig.color.split(' ')[0]}`}></div>
+                    <div className="flex-1 min-w-0">
+                        <div className="font-bold text-gray-800 truncate text-base">{task.productName}</div>
+                        <div className="flex items-center gap-2 text-sm mt-0.5"><span className="text-blue-600 font-bold bg-blue-50 px-1.5 py-0.5 rounded text-xs">{task.quantity}개</span><span className="text-gray-400 text-xs">{formatDate(task.updatedAt || task.createdAt).slice(5)}</span></div>
+                    </div>
+                    <div onClick={e => e.stopPropagation()}><select value={task.status} onChange={e => onStatusChange(task.id, e.target.value)} className={`text-xs font-semibold px-2 py-1.5 rounded-md border appearance-none outline-none cursor-pointer ${statusConfig.color}`}>{STATUS_OPTIONS.map(o => <option key={o} value={o}>{STATUS_MAP[o].label}</option>)}</select></div>
+                </div>
+            );
+        }
+        // 상세 모드 (완료 탭 등)
+        return (
+            <div className={`p-4 hover:bg-gray-50 flex gap-3 transition cursor-pointer ${statusConfig.borderL}`} onClick={onClick}>
+                <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-start"><h4 className="font-bold text-gray-800 truncate">{task.productName}</h4><span className="text-xs text-gray-400 ml-2 whitespace-nowrap">{formatDate(task.updatedAt)}</span></div>
+                    <div className="text-sm mt-1 text-gray-600">{task.quantity}개 x {formatCurrency(task.unitPrice)}</div>
+                </div>
+                <div className="text-right flex flex-col items-end gap-1">
+                    <span className="font-bold text-gray-900">{formatCurrency(task.revenue)}</span>
+                    <div onClick={e=>e.stopPropagation()}><select value={task.status} disabled={readonly} onChange={e=>onStatusChange(task.id, e.target.value)} className={`text-xs font-semibold px-2 py-1 rounded border outline-none ${statusConfig.color} ${readonly ? 'opacity-70' : ''}`}>{STATUS_OPTIONS.map(o=><option key={o} value={o}>{STATUS_MAP[o].label}</option>)}{task.status === 'settlement_requested' && <><option value="completed">반려 (수정)</option><option value="paid">지급 확인</option></>}</select></div>
+                </div>
+            </div>
+        );
+    };
+
+    const ProductManagerModal = ({ onClose, products, user }) => {
+        const [name, setName] = useState(''); const [price, setPrice] = useState(10000);
+        const handleAdd = async () => { if(name) { await addDoc(collection(db, `artifacts/${appId}/users/${user.uid}/products`), { name, defaultUnitPrice: Number(price), createdAt: serverTimestamp() }); setName(''); } };
+        return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"><div className="bg-white w-full max-w-md rounded-2xl max-h-[80vh] flex flex-col shadow-2xl"><div className="p-4 border-b flex justify-between font-bold items-center"><span>제품 관리</span><button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full"><X size={20}/></button></div><div className="p-4 space-y-3 bg-gray-50 border-b"><input className="w-full p-2 border rounded-lg" placeholder="새 제품명" value={name} onChange={e=>setName(e.target.value)}/><div className="flex gap-2"><input type="number" className="w-full p-2 border rounded-lg" value={price} onChange={e=>setPrice(e.target.value)}/><button onClick={handleAdd} className="bg-green-600 text-white px-4 rounded-lg font-bold shadow-sm hover:bg-green-700">추가</button></div></div><div className="flex-1 overflow-auto p-4 space-y-2">{products.map(p=><div key={p.id} className="flex justify-between items-center p-3 border rounded-lg hover:bg-gray-50 bg-white"><div><div className="font-bold">{p.name}</div><div className="text-xs text-gray-500">{formatCurrency(p.defaultUnitPrice)}</div></div><button onClick={()=>confirm('삭제하시겠습니까?') && deleteDoc(doc(db, `artifacts/${appId}/users/${user.uid}/products`, p.id))} className="text-red-500 p-2 hover:bg-red-50 rounded-full"><Trash2 size={16}/></button></div>)}</div></div></div>;
+    };
+
+    const StatsView = ({ tasks }) => {
+        const [start, setStart] = useState(''); const [end, setEnd] = useState('');
+        const filtered = tasks.filter(t => { const d = t.paymentDate?.toDate() || new Date(); return (!start || d >= new Date(start)) && (!end || d <= new Date(end+'T23:59:59')); });
+        const stats = filtered.reduce((acc, t) => ({ rev: acc.rev+(t.revenue||0), exp: acc.exp+(t.expense||0) }), {rev:0, exp:0});
+        return <div className="space-y-4 animate-fade-in"><div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm"><div className="flex gap-2 mb-4"><input type="date" className="flex-1 border p-2 rounded-lg bg-gray-50 text-sm" value={start} onChange={e=>setStart(e.target.value)}/><input type="date" className="flex-1 border p-2 rounded-lg bg-gray-50 text-sm" value={end} onChange={e=>setEnd(e.target.value)}/></div><div className="grid grid-cols-3 gap-2 text-center text-sm"><div className="bg-blue-50 p-3 rounded-lg"><div className="text-blue-600 text-xs font-semibold mb-1">총 수입</div><div className="font-bold text-blue-900">{formatCurrency(stats.rev).replace('₩','')}</div></div><div className="bg-red-50 p-3 rounded-lg"><div className="text-red-600 text-xs font-semibold mb-1">총 지출</div><div className="font-bold text-red-900">{formatCurrency(stats.exp).replace('₩','')}</div></div><div className="bg-green-50 p-3 rounded-lg"><div className="text-green-600 text-xs font-semibold mb-1">순이익</div><div className="font-bold text-green-900">{formatCurrency(stats.rev-stats.exp).replace('₩','')}</div></div></div></div><div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden"><div className="bg-gray-50 px-4 py-3 font-bold border-b border-gray-100 flex items-center gap-2 text-gray-700"><DollarSign size={16}/> 지급 완료 목록 ({filtered.length})</div><div className="divide-y divide-gray-50 max-h-80 overflow-auto">{filtered.map(t=><div key={t.id} className="p-3 flex justify-between items-center hover:bg-gray-50"><div><div className="font-semibold text-sm">{t.productName}</div><div className="text-xs text-gray-400">{t.client} | {formatDate(t.paymentDate)}</div></div><div className="text-right"><div className="font-bold text-green-600 text-sm">+{formatCurrency(t.revenue)}</div>{t.expense>0 && <div className="text-xs text-red-400">-{formatCurrency(t.expense)}</div>}</div></div>)}</div></div></div>;
+    };
+
+    const SettlementPreviewModal = ({ tasks, onClose, onConfirm }) => {
+        const text = useMemo(() => { let txt = `[정산요청서] ${new Date().toLocaleDateString()}\n`; const g = {}; tasks.forEach(t => { const c = t.client||'기타'; if(!g[c]) g[c]=[]; g[c].push(t); }); let tot=0; Object.entries(g).forEach(([c, l]) => { txt += `\n■ ${c}\n`; l.forEach(t => { txt += `- ${t.productName}\t${t.quantity}개\t${formatCurrency(t.revenue)}\n`; tot+=t.revenue; }); }); txt += `\n================\n총 청구금액: ${formatCurrency(tot)}`; return txt; }, [tasks]);
+        const copy = () => { navigator.clipboard.writeText(text).then(()=>alert("복사되었습니다!")).catch(()=>alert("복사 실패. 텍스트를 직접 복사해주세요.")); };
+        return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"><div className="bg-white w-full max-w-md rounded-2xl flex flex-col max-h-[80vh] shadow-2xl"><div className="p-4 border-b flex justify-between font-bold items-center"><span>정산서 미리보기</span><button onClick={onClose}><X size={20}/></button></div><pre className="p-4 bg-gray-50 flex-1 overflow-auto text-xs whitespace-pre-wrap font-mono leading-relaxed">{text}</pre><div className="p-4 flex gap-2 border-t"><button onClick={copy} className="flex-1 bg-gray-800 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-gray-900"><Copy size={16}/> 텍스트 복사</button><button onClick={onConfirm} className="flex-1 bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 shadow-lg">요청 확정</button></div></div></div>;
+    };
+
+    // 앱 실행
+    const root = createRoot(document.getElementById('root'));
+    root.render(<App />);
+</script>
+</body>
+</html>
