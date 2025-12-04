@@ -86,16 +86,16 @@
     } from 'lucide-react';
 
     // =================================================================
-    // [설정 영역] 파이어베이스 콘솔에서 복사한 SDK 설정을 여기에 붙여넣으세요.
+    // [설정 영역] 입력해주신 파이어베이스 설정값입니다.
     // =================================================================
     const firebaseConfig = {
        apiKey: "AIzaSyDvZzIleweh5KhxgEC1MJifXHbmxywzQog",
-  authDomain: "yupj1-32b66.firebaseapp.com",
-  projectId: "yupj1-32b66",
-  storageBucket: "yupj1-32b66.firebasestorage.app",
-  messagingSenderId: "70353187098",
-  appId: "1:70353187098:web:fabf15a6956fa297ef3ca3",
-  measurementId: "G-2YT3GJDGK3"
+       authDomain: "yupj1-32b66.firebaseapp.com",
+       projectId: "yupj1-32b66",
+       storageBucket: "yupj1-32b66.firebasestorage.app",
+       messagingSenderId: "70353187098",
+       appId: "1:70353187098:web:fabf15a6956fa297ef3ca3",
+       measurementId: "G-2YT3GJDGK3"
     };
 
     // 앱 고유 ID (데이터 저장 경로 구분용)
@@ -263,6 +263,7 @@
         const [isAuthenticated, setIsAuthenticated] = useState(() => sessionStorage.getItem('pin_verified') === 'true');
         const [activeTab, setActiveTab] = useState('progress');
         const [loading, setLoading] = useState(true);
+        const [authError, setAuthError] = useState(null); // 인증 에러 상태 추가
         const [tasks, setTasks] = useState([]);
         const [clients, setClients] = useState([]);
         const [products, setProducts] = useState([]);
@@ -279,12 +280,29 @@
         useEffect(() => {
             if (!auth) return;
             const initAuth = async () => {
-                try { await setPersistence(auth, browserLocalPersistence); } catch (e) { console.error("Persistence error:", e); }
-                // 자동 익명 로그인 (사용자 식별용)
-                await signInAnonymously(auth);
+                try { 
+                    await setPersistence(auth, browserLocalPersistence);
+                    // 자동 익명 로그인 (사용자 식별용)
+                    await signInAnonymously(auth);
+                } catch (e) { 
+                    console.error("Auth Error Details:", e);
+                    // 에러 메시지 설정
+                    if (e.code === 'auth/configuration-not-found' || e.code === 'auth/operation-not-allowed' || e.code === 'auth/admin-restricted-operation') {
+                        setAuthError({
+                            title: "파이어베이스 설정 필요",
+                            message: "파이어베이스 콘솔에서 '익명 로그인'이 비활성화되어 있습니다.\n콘솔 -> Authentication -> Sign-in method 탭에서 'Anonymous'를 사용 설정해주세요."
+                        });
+                    } else {
+                        setAuthError({
+                            title: "로그인 오류",
+                            message: `로그인 중 문제가 발생했습니다.\n${e.message}`
+                        });
+                    }
+                    setLoading(false);
+                }
             };
             initAuth();
-            return onAuthStateChanged(auth, (u) => { setUser(u); if (!u) setLoading(false); });
+            return onAuthStateChanged(auth, (u) => { setUser(u); if (!u && !authError) setLoading(false); });
         }, []);
 
         // 데이터 실시간 동기화
@@ -322,7 +340,27 @@
         const groupTasks = (taskList) => { const grouped = {}; taskList.forEach(task => { const client = task.client || '기타'; if (!grouped[client]) grouped[client] = []; grouped[client].push(task); }); return Object.entries(grouped).sort((a, b) => a[0].localeCompare(b[0])); };
 
         // 렌더링 시작
+        // 설정 오류 표시
         if (!app) return <div className="flex h-screen items-center justify-center p-6 text-center bg-gray-50"><div><h1 className="text-xl font-bold mb-3 text-red-600">설정 오류</h1><p>index.html 파일을 열고<br/><code className="bg-gray-200 p-1 rounded">firebaseConfig</code> 부분을 채워주세요.</p></div></div>;
+        
+        // 인증 오류 표시 (사용자에게 해결 방법 안내)
+        if (authError) {
+            return (
+                <div className="flex h-screen items-center justify-center p-6 text-center bg-gray-50">
+                    <div className="max-w-md bg-white p-8 rounded-2xl shadow-xl">
+                        <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <Lock size={32} />
+                        </div>
+                        <h1 className="text-xl font-bold mb-3 text-gray-800">{authError.title}</h1>
+                        <p className="text-gray-600 mb-6 whitespace-pre-line text-sm">{authError.message}</p>
+                        <a href="https://console.firebase.google.com/" target="_blank" className="inline-block w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition">
+                            파이어베이스 콘솔로 이동
+                        </a>
+                    </div>
+                </div>
+            );
+        }
+
         if (!user) return <div className="flex h-screen items-center justify-center bg-gray-50"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600"></div></div>;
         if (!isAuthenticated) return <PinAuth userId={user.uid} onAuthenticated={() => { setIsAuthenticated(true); sessionStorage.setItem('pin_verified', 'true'); }} />;
 
